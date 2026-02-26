@@ -60,18 +60,21 @@ function linqHeaders() {
   };
 }
 
-async function getOrCreateChat(to) {
+async function getOrCreateChat(to, initialText) {
   // Return cached chatId if we have one
   if (chatIdCache.has(to)) {
     console.log(`[LINQ] Using cached chatId for ${to}: ${chatIdCache.get(to)}`);
     return chatIdCache.get(to);
   }
 
-  // Create a new chat
+  // Create a new chat (LINQ v3 requires an initial_message)
   const url = `${LINQ_BASE}/v3/chats`;
   const body = {
     from: LINQ_FROM_NUMBER,
     to: [to],
+    initial_message: {
+      parts: [{ type: "text", value: initialText || "Hello" }],
+    },
   };
 
   console.log(`[LINQ] Creating chat: POST ${url}`);
@@ -360,7 +363,11 @@ app.get("/diag", async (_req, res) => {
 
   // Test LINQ v3 two-step: create chat then show chatId
   try {
-    const chatBody = { from: LINQ_FROM_NUMBER, to: [LINQ_FROM_NUMBER] };
+    const chatBody = {
+      from: LINQ_FROM_NUMBER,
+      to: [LINQ_FROM_NUMBER],
+      initial_message: { parts: [{ type: "text", value: "diag test" }] },
+    };
     const chatRes = await fetch(`${LINQ_BASE}/v3/chats`, {
       method: "POST",
       headers: linqHeaders(),
