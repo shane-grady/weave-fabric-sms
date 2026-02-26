@@ -70,8 +70,8 @@ async function getOrCreateChat(to) {
   // Create a new chat
   const url = `${LINQ_BASE}/v3/chats`;
   const body = {
-    handles: [LINQ_FROM_NUMBER, to],
-    service: "sms",
+    from: LINQ_FROM_NUMBER,
+    to: [to],
   };
 
   console.log(`[LINQ] Creating chat: POST ${url}`);
@@ -90,7 +90,7 @@ async function getOrCreateChat(to) {
   }
 
   const parsed = JSON.parse(responseText);
-  const chatId = parsed?.data?.id || parsed?.id;
+  const chatId = parsed?.chat?.id || parsed?.data?.id || parsed?.id;
   if (!chatId) {
     console.error("[LINQ] No chatId in response:", responseText);
     throw new Error("No chatId returned from LINQ");
@@ -113,8 +113,8 @@ async function sendSms(to, text, chatId) {
 
     const url = `${LINQ_BASE}/v3/chats/${resolvedChatId}/messages`;
     const body = {
-      parts: [{ type: "text", value: text }],
-      sender_handle: LINQ_FROM_NUMBER,
+      message: { parts: [{ type: "text", value: text }] },
+      service: "sms",
     };
 
     console.log(`[sendSms] POST ${url}`);
@@ -360,7 +360,7 @@ app.get("/diag", async (_req, res) => {
 
   // Test LINQ v3 two-step: create chat then show chatId
   try {
-    const chatBody = { handles: [LINQ_FROM_NUMBER, LINQ_FROM_NUMBER], service: "sms" };
+    const chatBody = { from: LINQ_FROM_NUMBER, to: [LINQ_FROM_NUMBER] };
     const chatRes = await fetch(`${LINQ_BASE}/v3/chats`, {
       method: "POST",
       headers: linqHeaders(),
@@ -368,7 +368,7 @@ app.get("/diag", async (_req, res) => {
     });
     const chatText = await chatRes.text();
     const chatParsed = chatRes.ok ? JSON.parse(chatText) : null;
-    const chatId = chatParsed?.data?.id || chatParsed?.id || null;
+    const chatId = chatParsed?.chat?.id || chatParsed?.data?.id || chatParsed?.id || null;
     results.linq_test = {
       create_chat_status: chatRes.status,
       chat_id: chatId,
