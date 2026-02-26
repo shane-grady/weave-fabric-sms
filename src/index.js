@@ -67,13 +67,12 @@ async function getOrCreateChat(to, initialText) {
     return chatIdCache.get(to);
   }
 
-  // Create a new chat (LINQ v3 requires an initial_message)
+  // Create a new chat (LINQ v3 uses "message" not "initial_message")
   const url = `${LINQ_BASE}/v3/chats`;
   const body = {
     from: LINQ_FROM_NUMBER,
     to: [to],
-    service: "sms",
-    initial_message: {
+    message: {
       parts: [{ type: "text", value: initialText || "Hello" }],
     },
   };
@@ -368,7 +367,7 @@ app.get("/diag", async (_req, res) => {
       from: LINQ_FROM_NUMBER,
       to: [LINQ_FROM_NUMBER],
       service: "sms",
-      initial_message: { parts: [{ type: "text", value: "diag test" }] },
+      message: { parts: [{ type: "text", value: "diag test" }] },
     };
     const chatRes = await fetch(`${LINQ_BASE}/v3/chats`, {
       method: "POST",
