@@ -72,6 +72,7 @@ async function getOrCreateChat(to, initialText) {
   const body = {
     from: LINQ_FROM_NUMBER,
     to: [to],
+    service: "sms",
     initial_message: {
       parts: [{ type: "text", value: initialText || "Hello" }],
     },
@@ -346,7 +347,7 @@ app.use(
 );
 
 // Health check
-app.get("/", (_req, res) => res.json({ status: "ok", service: "sms-memory-bot" }));
+app.get("/", (_req, res) => res.json({ status: "ok", service: "sms-memory-bot", version: "v6-from-to" }));
 
 // Diagnostic endpoint — checks LINQ API connectivity
 app.get("/diag", async (_req, res) => {
@@ -366,6 +367,7 @@ app.get("/diag", async (_req, res) => {
     const chatBody = {
       from: LINQ_FROM_NUMBER,
       to: [LINQ_FROM_NUMBER],
+      service: "sms",
       initial_message: { parts: [{ type: "text", value: "diag test" }] },
     };
     const chatRes = await fetch(`${LINQ_BASE}/v3/chats`, {
