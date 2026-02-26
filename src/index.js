@@ -20,8 +20,9 @@ const LINQ_BASE = "https://api.linqapp.com/api/partner";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-// ── In-memory MCP client cache (phone → Client) ────────────────────
-const mcpClients = new Map();
+// ── In-memory caches ────────────────────────────────────────────────
+const mcpClients = new Map();   // phone → MCP Client
+const chatIdCache = new Map();  // phone → LINQ chatId
 
 async function getMcpClient(phoneNumber, mcpUrl) {
   if (mcpClients.has(phoneNumber)) return mcpClients.get(phoneNumber);
@@ -48,35 +49,101 @@ console.log("[Config] SUPABASE_URL set:", !!SUPABASE_URL);
 console.log("[Config] ANTHROPIC_API_KEY set:", !!ANTHROPIC_API_KEY);
 
 // ── LINQ helpers ────────────────────────────────────────────────────
-async function sendSms(to, text) {
-  const token = LINQ_API_TOKEN?.trim();
+// LINQ v3 API uses two steps:
+//   1. Create a chat:  POST /v3/chats  → returns { data: { id: chatId } }
+//   2. Send a message:  POST /v3/chats/{chatId}/messages
+
+function linqHeaders() {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${LINQ_API_TOKEN?.trim()}`,
+  };
+}
+
+async function getOrCreateChat(to) {
+  // Return cached chatId if we have one
+  if (chatIdCache.has(to)) {
+    console.log(`[LINQ] Using cached chatId for ${to}: ${chatIdCache.get(to)}`);
+    return chatIdCache.get(to);
+  }
+
+  // Create a new chat
   const url = `${LINQ_BASE}/v3/chats`;
   const body = {
-    from: LINQ_FROM_NUMBER,
-    to,
-    message: { parts: [{ type: "text", value: text }] },
+    handles: [LINQ_FROM_NUMBER, to],
+    service: "sms",
   };
 
-  console.log(`[sendSms] POST ${url}`);
-  console.log(`[sendSms] Token prefix: ${token?.substring(0, 8)}... (len=${token?.length})`);
-  console.log(`[sendSms] From: ${LINQ_FROM_NUMBER}, To: ${to}`);
+  console.log(`[LINQ] Creating chat: POST ${url}`);
+  console.log(`[LINQ] Body:`, JSON.stringify(body));
 
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
+    headers: linqHeaders(),
     body: JSON.stringify(body),
   });
 
   const responseText = await res.text();
   if (!res.ok) {
-    console.error("[LINQ send error]", res.status, responseText);
-  } else {
-    console.log("[LINQ send success]", res.status, responseText);
+    console.error("[LINQ create chat error]", res.status, responseText);
+    throw new Error(`Failed to create chat: ${res.status} ${responseText}`);
   }
-  return res;
+
+  const parsed = JSON.parse(responseText);
+  const chatId = parsed?.data?.id || parsed?.id;
+  if (!chatId) {
+    console.error("[LINQ] No chatId in response:", responseText);
+    throw new Error("No chatId returned from LINQ");
+  }
+
+  console.log(`[LINQ] Created chat ${chatId} for ${to}`);
+  chatIdCache.set(to, chatId);
+  return chatId;
+}
+
+async function sendSms(to, text, chatId) {
+  try {
+    // Use provided chatId, or get/create one
+    const resolvedChatId = chatId || await getOrCreateChat(to);
+
+    // Cache it for future use
+    if (!chatIdCache.has(to)) {
+      chatIdCache.set(to, resolvedChatId);
+    }
+
+    const url = `${LINQ_BASE}/v3/chats/${resolvedChatId}/messages`;
+    const body = {
+      parts: [{ type: "text", value: text }],
+      sender_handle: LINQ_FROM_NUMBER,
+    };
+
+    console.log(`[sendSms] POST ${url}`);
+    console.log(`[sendSms] Body:`, JSON.stringify(body).substring(0, 200));
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: linqHeaders(),
+      body: JSON.stringify(body),
+    });
+
+    const responseText = await res.text();
+    if (!res.ok) {
+      console.error("[LINQ send error]", res.status, responseText);
+
+      // If chat not found, clear cache and retry once
+      if (res.status === 404 && chatIdCache.has(to)) {
+        console.log("[sendSms] Chat not found, clearing cache and retrying...");
+        chatIdCache.delete(to);
+        return sendSms(to, text); // retry without chatId
+      }
+    } else {
+      console.log("[LINQ send success]", res.status, responseText.substring(0, 200));
+    }
+    return res;
+  } catch (err) {
+    console.error("[sendSms] Error:", err.message);
+    throw err;
+  }
 }
 
 function verifyWebhook(signature, timestamp, rawBody) {
@@ -150,14 +217,14 @@ When a user wants to save something, use the weave_create_memory tool. When they
 
 If a tool call fails, let the user know briefly and suggest they try again.`;
 
-async function handleActiveUser(phone, mcpUrl, userMessage) {
+async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
   // Connect to user's MCP and discover tools
   let mcpClient;
   try {
     mcpClient = await getMcpClient(phone, mcpUrl);
   } catch (err) {
     console.error("[MCP connect error]", err.message);
-    await sendSms(phone, "Having trouble connecting to your memory service. Please check your MCP URL and try again. Text 'reset' to update your URL.");
+    await sendSms(phone, "Having trouble connecting to your memory service. Please check your MCP URL and try again. Text 'reset' to update your URL.", chatId);
     return;
   }
 
@@ -169,7 +236,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage) {
   } catch (err) {
     console.error("[MCP listTools error]", err.message);
     await disconnectMcpClient(phone);
-    await sendSms(phone, "Couldn't reach your memory service. Try again in a moment.");
+    await sendSms(phone, "Couldn't reach your memory service. Try again in a moment.", chatId);
     return;
   }
 
@@ -201,7 +268,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage) {
     });
   } catch (err) {
     console.error("[Claude API error]", err.message);
-    await sendSms(phone, "Something went wrong processing your message. Try again!");
+    await sendSms(phone, "Something went wrong processing your message. Try again!", chatId);
     return;
   }
 
@@ -247,7 +314,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage) {
       });
     } catch (err) {
       console.error("[Claude API error in tool loop]", err.message);
-      await sendSms(phone, "Something went wrong. Try again!");
+      await sendSms(phone, "Something went wrong. Try again!", chatId);
       return;
     }
   }
@@ -260,7 +327,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage) {
   await touchUser(phone);
 
   // Split long messages for SMS (160 char segments, but LINQ handles this)
-  await sendSms(phone, reply);
+  await sendSms(phone, reply, chatId);
 }
 
 // ── Express server ──────────────────────────────────────────────────
@@ -366,6 +433,12 @@ app.post("/webhook", async (req, res) => {
       userMessage = textPart?.value?.trim();
     }
 
+    // Cache the chatId from this webhook so replies go to the right chat
+    if (chatId && fromPhone) {
+      chatIdCache.set(fromPhone, chatId);
+      console.log(`[Webhook] Cached chatId ${chatId} for ${fromPhone}`);
+    }
+
     console.log(`[Webhook] Parsed: chat=${chatId}, from=${fromPhone}, text=${userMessage?.substring(0, 80)}`);
 
     if (!userMessage || !fromPhone) {
@@ -386,7 +459,8 @@ app.post("/webhook", async (req, res) => {
       user = await createUser(fromPhone);
       await sendSms(
         fromPhone,
-        "Welcome to Weave Memory Bot! \ud83e\udde0\n\nTo get started, please send me your Weave MCP URL. You can find it in your Weave settings.\n\nIt looks like: https://mcp.weave.cloud/sse?key=..."
+        "Welcome to Weave Memory Bot! \ud83e\udde0\n\nTo get started, please send me your Weave MCP URL. You can find it in your Weave settings.\n\nIt looks like: https://mcp.weave.cloud/sse?key=...",
+        chatId
       );
       return;
     }
@@ -399,7 +473,8 @@ app.post("/webhook", async (req, res) => {
       if (!url.startsWith("http://") && !url.startsWith("https://")) {
         await sendSms(
           fromPhone,
-          "That doesn't look like a URL. Please send your Weave MCP URL (starts with https://)"
+          "That doesn't look like a URL. Please send your Weave MCP URL (starts with https://)",
+          chatId
         );
         return;
       }
@@ -415,13 +490,15 @@ app.post("/webhook", async (req, res) => {
         await activateUser(fromPhone, url);
         await sendSms(
           fromPhone,
-          `Connected! Found ${tools.length} memory tools. \ud83c\udf89\n\nYou can now:\n\u2022 Save memories: "Remember that my wifi password is abc123"\n\u2022 Search: "What's my wifi password?"\n\u2022 Chat: "What do I know about recipes?"\n\nText 'reset' anytime to update your MCP URL.`
+          `Connected! Found ${tools.length} memory tools. \ud83c\udf89\n\nYou can now:\n\u2022 Save memories: "Remember that my wifi password is abc123"\n\u2022 Search: "What's my wifi password?"\n\u2022 Chat: "What do I know about recipes?"\n\nText 'reset' anytime to update your MCP URL.`,
+          chatId
         );
       } catch (err) {
         console.error("[MCP validation error]", err.message);
         await sendSms(
           fromPhone,
-          "Couldn't connect to that MCP URL. Please double-check it and try again.\n\nMake sure it's your full Weave MCP URL."
+          "Couldn't connect to that MCP URL. Please double-check it and try again.\n\nMake sure it's your full Weave MCP URL.",
+          chatId
         );
       }
       return;
@@ -436,11 +513,11 @@ app.post("/webhook", async (req, res) => {
           .from("sms_users")
           .update({ status: "awaiting_mcp_url", mcp_url: null })
           .eq("phone_number", fromPhone);
-        await sendSms(fromPhone, "MCP connection reset. Please send your new Weave MCP URL.");
+        await sendSms(fromPhone, "MCP connection reset. Please send your new Weave MCP URL.", chatId);
         return;
       }
 
-      await handleActiveUser(fromPhone, user.mcp_url, userMessage);
+      await handleActiveUser(fromPhone, user.mcp_url, userMessage, chatId);
     }
   } catch (err) {
     console.error("[Webhook handler error]", err);
