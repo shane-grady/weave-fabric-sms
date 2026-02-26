@@ -358,18 +358,23 @@ app.get("/diag", async (_req, res) => {
     linq_test: null,
   };
 
-  // Test LINQ auth with a minimal request (will get 400 for bad body, but proves auth works)
+  // Test LINQ v3 two-step: create chat then show chatId
   try {
-    const testRes = await fetch(`${LINQ_BASE}/v3/chats`, {
+    const chatBody = { handles: [LINQ_FROM_NUMBER, LINQ_FROM_NUMBER], service: "sms" };
+    const chatRes = await fetch(`${LINQ_BASE}/v3/chats`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ from: "test", to: "test", message: { parts: [{ type: "text", value: "diag" }] } }),
+      headers: linqHeaders(),
+      body: JSON.stringify(chatBody),
     });
-    const body = await testRes.text();
-    results.linq_test = { status: testRes.status, body, auth_ok: testRes.status !== 401 };
+    const chatText = await chatRes.text();
+    const chatParsed = chatRes.ok ? JSON.parse(chatText) : null;
+    const chatId = chatParsed?.data?.id || chatParsed?.id || null;
+    results.linq_test = {
+      create_chat_status: chatRes.status,
+      chat_id: chatId,
+      auth_ok: chatRes.status !== 401,
+      body_preview: chatText.substring(0, 300),
+    };
   } catch (err) {
     results.linq_test = { error: err.message };
   }
