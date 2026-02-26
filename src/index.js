@@ -41,23 +41,40 @@ async function disconnectMcpClient(phoneNumber) {
   }
 }
 
+// ── Startup config validation ────────────────────────────────────────
+console.log("[Config] LINQ_API_TOKEN set:", !!LINQ_API_TOKEN, "length:", LINQ_API_TOKEN?.length);
+console.log("[Config] LINQ_FROM_NUMBER set:", !!LINQ_FROM_NUMBER, "value:", LINQ_FROM_NUMBER);
+console.log("[Config] SUPABASE_URL set:", !!SUPABASE_URL);
+console.log("[Config] ANTHROPIC_API_KEY set:", !!ANTHROPIC_API_KEY);
+
 // ── LINQ helpers ────────────────────────────────────────────────────
 async function sendSms(to, text) {
-  const res = await fetch(`${LINQ_BASE}/v3/chats`, {
+  const token = LINQ_API_TOKEN?.trim();
+  const url = `${LINQ_BASE}/v3/chats`;
+  const body = {
+    from: LINQ_FROM_NUMBER,
+    to,
+    message: { parts: [{ type: "text", value: text }] },
+  };
+
+  console.log(`[sendSms] POST ${url}`);
+  console.log(`[sendSms] Token prefix: ${token?.substring(0, 8)}... (len=${token?.length})`);
+  console.log(`[sendSms] From: ${LINQ_FROM_NUMBER}, To: ${to}`);
+
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${LINQ_API_TOKEN}`,
+      Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({
-      from: LINQ_FROM_NUMBER,
-      to,
-      message: { parts: [{ type: "text", value: text }] },
-    }),
+    body: JSON.stringify(body),
   });
+
+  const responseText = await res.text();
   if (!res.ok) {
-    const err = await res.text();
-    console.error("[LINQ send error]", res.status, err);
+    console.error("[LINQ send error]", res.status, responseText);
+  } else {
+    console.log("[LINQ send success]", res.status, responseText);
   }
   return res;
 }
@@ -260,6 +277,38 @@ app.use(
 
 // Health check
 app.get("/", (_req, res) => res.json({ status: "ok", service: "sms-memory-bot" }));
+
+// Diagnostic endpoint — checks LINQ API connectivity
+app.get("/diag", async (_req, res) => {
+  const token = LINQ_API_TOKEN?.trim();
+  const results = {
+    env: {
+      LINQ_API_TOKEN: token ? `${token.substring(0, 8)}...${token.substring(token.length - 4)} (len=${token.length})` : "NOT SET",
+      LINQ_FROM_NUMBER: LINQ_FROM_NUMBER || "NOT SET",
+      SUPABASE_URL: SUPABASE_URL ? "SET" : "NOT SET",
+      ANTHROPIC_API_KEY: ANTHROPIC_API_KEY ? "SET" : "NOT SET",
+    },
+    linq_test: null,
+  };
+
+  // Test LINQ auth with a minimal request (will get 400 for bad body, but proves auth works)
+  try {
+    const testRes = await fetch(`${LINQ_BASE}/v3/chats`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ from: "test", to: "test", message: { parts: [{ type: "text", value: "diag" }] } }),
+    });
+    const body = await testRes.text();
+    results.linq_test = { status: testRes.status, body, auth_ok: testRes.status !== 401 };
+  } catch (err) {
+    results.linq_test = { error: err.message };
+  }
+
+  res.json(results);
+});
 
 // LINQ webhook endpoint
 app.post("/webhook", async (req, res) => {
