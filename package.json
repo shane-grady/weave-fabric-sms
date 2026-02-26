@@ -1,0 +1,16 @@
+{
+  "name": "weave-fabric-sms",
+  "version": "1.0.0",
+  "description": "SMS chatbot with Weave memory via MCP",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@supabase/supabase-js": "^2.49.4",
+    "express": "^4.21.2"
+  }
+}
