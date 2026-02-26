@@ -264,7 +264,14 @@ app.get("/", (_req, res) => res.json({ status: "ok", service: "sms-memory-bot" }
 // LINQ webhook endpoint
 app.post("/webhook", async (req, res) => {
   try {
-    const signature = req.headers["x-webhook-signature"];
+    // Log full payload for debugging (chunked to avoid truncation)
+    const fullPayload = JSON.stringify(req.body);
+    console.log(`[Webhook] Received (${fullPayload.length} chars):`);
+    for (let i = 0; i < fullPayload.length; i += 1000) {
+      console.log(`[Webhook] payload[${i}]: ${fullPayload.substring(i, i + 1000)}`);
+    }
+
+    const signature = req.headers["x-webhook-signature"] || req.headers["x-linq-signature"];
     const timestamp = req.headers["x-webhook-timestamp"];
 
     // Verify signature
@@ -274,21 +281,46 @@ app.post("/webhook", async (req, res) => {
     }
 
     const { event_type, data } = req.body;
-    console.log(`[Webhook] ${event_type}`, JSON.stringify(data?.from || {}));
 
     // Only handle inbound messages
     if (event_type !== "message.received") {
+      console.log(`[Webhook] Ignoring event: ${event_type}`);
       return res.json({ ok: true });
     }
 
-    // Extract message text and sender
-    const parts = data?.parts || data?.message?.parts || [];
-    const textPart = parts.find((p) => p.type === "text");
-    const userMessage = textPart?.value?.trim();
-    const fromPhone = data?.from?.handle;
+    // ── Parse Linq v3 payload ──
+    // v3 nests data under data.chat and data.message
+    const chat = data?.chat || {};
+    const message = data?.message || data || {};
+    const chatId = chat.id || data?.chat_id;
+
+    // Extract sender phone — try v3 nested paths then legacy
+    const senderHandle = message.sender_handle || message.sender || {};
+    const fromPhone = senderHandle.handle || data?.from?.handle;
+
+    // Skip messages from ourselves
+    if (senderHandle.is_me === true) {
+      console.log(`[Webhook] Ignoring message from self`);
+      return res.json({ ok: true });
+    }
+
+    // Extract message text — try v3 paths then legacy parts array
+    let userMessage;
+    if (message.text) {
+      userMessage = message.text.trim();
+    } else if (message.body) {
+      userMessage = message.body.trim();
+    } else {
+      // Legacy: parts array format
+      const parts = data?.parts || message?.parts || [];
+      const textPart = parts.find((p) => p.type === "text");
+      userMessage = textPart?.value?.trim();
+    }
+
+    console.log(`[Webhook] Parsed: chat=${chatId}, from=${fromPhone}, text=${userMessage?.substring(0, 80)}`);
 
     if (!userMessage || !fromPhone) {
-      console.warn("[Webhook] Missing message or sender");
+      console.warn("[Webhook] Missing message or sender phone");
       return res.json({ ok: true });
     }
 
