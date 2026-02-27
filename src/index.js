@@ -232,7 +232,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
     mcpClient = await getMcpClient(phone, mcpUrl);
   } catch (err) {
     console.error("[MCP connect error]", err.message);
-    await sendSms(phone, "Having trouble connecting to your memory service. Please check your MCP URL and try again. Text 'reset' to update your URL.", chatId);
+    await sendSms(phone, "Having trouble reaching your memories right now. Try again in a moment, or text /reset to reconnect with a new MCP URL.", chatId);
     return;
   }
 
@@ -255,7 +255,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
       mcpTools = tools;
     } catch (retryErr) {
       console.error("[MCP reconnect failed]", retryErr.message);
-      await sendSms(phone, "Couldn't reach your memory service. Try again in a sec.", chatId);
+      await sendSms(phone, "Couldn't reach your memories right now. Try again in a sec!", chatId);
       return;
     }
   }
@@ -288,7 +288,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
     });
   } catch (err) {
     console.error("[Claude API error]", err.message);
-    await sendSms(phone, "Something went wrong processing your message. Try again!", chatId);
+    await sendSms(phone, "Oops, something hiccuped on my end. Try sending that again!", chatId);
     return;
   }
 
@@ -337,7 +337,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
       });
     } catch (err) {
       console.error("[Claude API error in tool loop]", err.message);
-      await sendSms(phone, "Something went wrong. Try again!", chatId);
+      await sendSms(phone, "Oops, something hiccuped. Try sending that again!", chatId);
       return;
     }
   }
@@ -634,7 +634,7 @@ app.post("/webhook", async (req, res) => {
       user = await createUser(fromPhone);
       await sendSms(
         fromPhone,
-        "Welcome to Weave Memory Bot! \ud83e\udde0\n\nTo get started, please send me your Weave MCP URL. You can find it in your Weave settings.\n\nIt looks like: https://mcp.weave.cloud/sse?key=...",
+        `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nI can remember things for you, help you find them later, and forget anything you want gone. All by texting me.\n\nTo get connected, paste your MCP URL from Weave Fabric. You can find it in your Weave Fabric account under Settings.`,
         chatId
       );
       return;
@@ -648,7 +648,7 @@ app.post("/webhook", async (req, res) => {
       if (!url.startsWith("http://") && !url.startsWith("https://")) {
         await sendSms(
           fromPhone,
-          "That doesn't look like a URL. Please send your Weave MCP URL (starts with https://)",
+          `Hmm, that doesn't look like an MCP URL. It should be a link that starts with https://\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Just paste it here when you're ready!`,
           chatId
         );
         return;
@@ -665,14 +665,14 @@ app.post("/webhook", async (req, res) => {
         await activateUser(fromPhone, url);
         await sendSms(
           fromPhone,
-          `Connected! Found ${tools.length} memory tools. \ud83c\udf89\n\nYou can now:\n\u2022 Save memories: "Remember that my wifi password is abc123"\n\u2022 Search: "What's my wifi password?"\n\u2022 Chat: "What do I know about recipes?"\n\nText 'reset' anytime to update your MCP URL.`,
+          `You're all set! 🎉\n\nHere's what you can do — just text me like you normally would:\n\n💾 Create a memory: "Remember that my anniversary is March 5th"\n🔍 Find a memory: "When is my anniversary?"\n🗑️ Forget something: "Forget my old wifi password"\n\nThat's it — I'm your second brain. Text me anytime!`,
           chatId
         );
       } catch (err) {
         console.error("[MCP validation error]", err.message);
         await sendSms(
           fromPhone,
-          "Couldn't connect to that MCP URL. Please double-check it and try again.\n\nMake sure it's your full Weave MCP URL.",
+          `Hmm, I wasn't able to connect with that URL. Could you double-check it?\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Paste it here and I'll try again!`,
           chatId
         );
       }
