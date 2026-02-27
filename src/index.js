@@ -218,6 +218,9 @@ Keep responses concise and SMS-friendly (under 300 chars when possible). Be warm
 
 When a user wants to save something, use the weave_create_memory tool. When they want to find something, use weave_list_memories with a query. When they want to delete something, use weave_forget_memory. When they want to chat with their memories or ask questions about what they've saved, use weave_chat.
 
+IMPORTANT - Pagination for weave_list_memories:
+Always pass pageSize: 100 when calling weave_list_memories to retrieve the maximum number of results per page. After receiving results, check the pagination info in the response (total count and hasMore flag). If there are more results beyond the current page, make additional calls with incrementing page numbers (page: 2, page: 3, etc.) until all results are retrieved. Combine all pages before summarizing results to the user. Never assume the first page contains all memories.
+
 If a tool call fails, let the user know briefly and suggest they try again.`;
 
 async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
@@ -231,11 +234,15 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
     return;
   }
 
-  // Discover available MCP tools
-  let mcpTools;
+  // Discover available MCP tools (with pagination support)
+  let mcpTools = [];
   try {
-    const toolsResult = await mcpClient.listTools();
-    mcpTools = toolsResult.tools || [];
+    let cursor;
+    do {
+      const toolsResult = await mcpClient.listTools(cursor ? { cursor } : undefined);
+      mcpTools = mcpTools.concat(toolsResult.tools || []);
+      cursor = toolsResult.nextCursor;
+    } while (cursor);
   } catch (err) {
     console.error("[MCP listTools error]", err.message);
     await disconnectMcpClient(phone);
