@@ -160,6 +160,14 @@ function verifyWebhook(signature, timestamp, rawBody) {
   return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
 
+// ── URL extraction helper ───────────────────────────────────────────
+// Extracts the first http/https URL from a message that may contain
+// surrounding text (e.g. "This is my MCP URL: https://example.com")
+function extractUrl(text) {
+  const match = text.match(/https?:\/\/[^\s]+/i);
+  return match ? match[0] : null;
+}
+
 // ── Supabase helpers ────────────────────────────────────────────────
 async function getUser(phone) {
   const { data } = await supabase
@@ -632,6 +640,35 @@ app.post("/webhook", async (req, res) => {
     // ── New user ──
     if (!user) {
       user = await createUser(fromPhone);
+
+      // Check if the first message already contains an MCP URL (e.g. deep-link from the app)
+      const embeddedUrl = extractUrl(userMessage);
+      if (embeddedUrl) {
+        console.log(`[New user] First message contains URL, skipping welcome: ${embeddedUrl}`);
+        try {
+          const testClient = new Client({ name: "sms-memory-bot-test", version: "1.0.0" });
+          const testTransport = new StreamableHTTPClientTransport(new URL(embeddedUrl));
+          await testClient.connect(testTransport);
+          const { tools } = await testClient.listTools();
+          await testClient.close();
+
+          await activateUser(fromPhone, embeddedUrl);
+          await sendSms(
+            fromPhone,
+            `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nYou're all set! 🎉\n\nHere's what you can do — just text me like you normally would:\n\n💾 Create a memory: "Remember that my anniversary is March 5th"\n🔍 Find a memory: "When is my anniversary?"\n🗑️ Forget something: "Forget my old wifi password"\n\nThat's it — I'm your second brain. Text me anytime!`,
+            chatId
+          );
+        } catch (err) {
+          console.error("[New user MCP validation error]", err.message);
+          await sendSms(
+            fromPhone,
+            `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nI tried connecting with the URL you sent, but it didn't work. Could you double-check it?\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Paste it here and I'll try again!`,
+            chatId
+          );
+        }
+        return;
+      }
+
       await sendSms(
         fromPhone,
         `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nI can remember things for you, help you find them later, and forget anything you want gone. All by texting me.\n\nTo get connected, paste your MCP URL from Weave Fabric. You can find it in your Weave Fabric account under Settings.`,
@@ -642,10 +679,10 @@ app.post("/webhook", async (req, res) => {
 
     // ── Awaiting MCP URL ──
     if (user.status === "awaiting_mcp_url") {
-      const url = userMessage.trim();
+      // Extract URL from message — supports bare URLs and messages with surrounding text
+      const url = extractUrl(userMessage);
 
-      // Basic URL validation
-      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      if (!url) {
         await sendSms(
           fromPhone,
           `Hmm, that doesn't look like an MCP URL. It should be a link that starts with https://\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Just paste it here when you're ready!`,
