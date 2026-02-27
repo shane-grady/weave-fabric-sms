@@ -150,15 +150,14 @@ async function sendSms(to, text, chatId) {
 }
 
 function verifyWebhook(signature, timestamp, rawBody) {
-  if (!LINQ_SIGNING_SECRET) return true; // skip if not configured yet
+  if (!LINQ_SIGNING_SECRET) return true;
   const expected = crypto
     .createHmac("sha256", LINQ_SIGNING_SECRET)
     .update(`${timestamp}.${rawBody}`)
     .digest("hex");
-  return crypto.timingSafeEqual(
-    Buffer.from(signature || ""),
-    Buffer.from(expected)
-  );
+  const sig = signature || "";
+  if (sig.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
 
 // ── Supabase helpers ────────────────────────────────────────────────
@@ -195,7 +194,7 @@ async function touchUser(phone) {
     .eq("phone_number", phone);
 }
 
-async function getConversationHistory(phone, limit = 20) {
+async function getConversationHistory(phone, limit = 30) {
   const { data } = await supabase
     .from("sms_conversations")
     .select("role, content")
@@ -212,13 +211,19 @@ async function saveMessage(phone, role, content) {
 }
 
 // ── Claude + MCP tool execution ─────────────────────────────────────
-const SYSTEM_PROMPT = `You are a helpful memory assistant available via SMS. You help users save, search, and manage their personal memories using the Weave memory system.
+const SYSTEM_PROMPT = `You're a chill memory sidekick over text. You help people save, find, and manage their stuff using Weave.
 
-Keep responses concise and SMS-friendly (under 300 chars when possible). Be warm and conversational.
+Keep it short — this is SMS, not email. Be friendly and natural, like texting a friend.
 
-When a user wants to save something, use the weave_create_memory tool. When they want to find something, use weave_list_memories with a query. When they want to delete something, use weave_forget_memory. When they want to chat with their memories or ask questions about what they've saved, use weave_chat.
+Tool strategy:
+- Saving something new → weave_create_memory
+- Any question about their memories ("what do I know about...", "do I have...", "find my...") → ALWAYS use weave_chat first. It does deep semantic search and is the best way to find relevant stuff even if the wording doesn't match exactly.
+- Browsing or listing all memories → weave_list_memories with pageSize: 100. If the response shows more pages exist (hasMore: true), keep calling with page: 2, 3, etc. until you have everything.
+- Deleting something → weave_forget_memory
 
-If a tool call fails, let the user know briefly and suggest they try again.`;
+CRITICAL: NEVER tell someone you couldn't find anything or that there are no related memories without trying BOTH weave_chat AND weave_list_memories. Always exhaust both tools before saying nothing was found. False negatives are the worst experience — when in doubt, dig deeper.
+
+If a tool errors out, just let them know and suggest trying again.`;
 
 async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
   // Connect to user's MCP and discover tools
@@ -231,16 +236,28 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
     return;
   }
 
-  // Discover available MCP tools
-  let mcpTools;
+  // Discover available MCP tools (with cursor pagination)
+  let mcpTools = [];
   try {
-    const toolsResult = await mcpClient.listTools();
-    mcpTools = toolsResult.tools || [];
+    const params = {};
+    do {
+      const { tools = [], nextCursor } = await mcpClient.listTools(params);
+      mcpTools.push(...tools);
+      params.cursor = nextCursor;
+    } while (params.cursor);
   } catch (err) {
-    console.error("[MCP listTools error]", err.message);
+    // Connection may be stale — reconnect once
+    console.error("[MCP listTools error]", err.message, "— reconnecting");
     await disconnectMcpClient(phone);
-    await sendSms(phone, "Couldn't reach your memory service. Try again in a moment.", chatId);
-    return;
+    try {
+      mcpClient = await getMcpClient(phone, mcpUrl);
+      const { tools = [] } = await mcpClient.listTools();
+      mcpTools = tools;
+    } catch (retryErr) {
+      console.error("[MCP reconnect failed]", retryErr.message);
+      await sendSms(phone, "Couldn't reach your memory service. Try again in a sec.", chatId);
+      return;
+    }
   }
 
   // Convert MCP tools to Claude tool format
@@ -275,33 +292,36 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
     return;
   }
 
-  // Tool use loop - keep going until we get a final text response
-  while (response.stop_reason === "tool_use") {
+  // Tool use loop — keep going until we get a final text response
+  const MAX_TOOL_ROUNDS = 10;
+  let toolRound = 0;
+  while (response.stop_reason === "tool_use" && toolRound++ < MAX_TOOL_ROUNDS) {
     const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
-    const toolResults = [];
 
-    for (const toolUse of toolUseBlocks) {
-      console.log(`[Tool call] ${toolUse.name}`, JSON.stringify(toolUse.input));
-      try {
-        const result = await mcpClient.callTool({
-          name: toolUse.name,
-          arguments: toolUse.input,
-        });
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: JSON.stringify(result.content),
-        });
-      } catch (err) {
-        console.error(`[Tool error] ${toolUse.name}:`, err.message);
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: `Error: ${err.message}`,
-          is_error: true,
-        });
-      }
-    }
+    const toolResults = await Promise.all(
+      toolUseBlocks.map(async (toolUse) => {
+        console.log(`[Tool call] ${toolUse.name}`, JSON.stringify(toolUse.input));
+        try {
+          const result = await mcpClient.callTool({
+            name: toolUse.name,
+            arguments: toolUse.input,
+          });
+          return {
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(result.content),
+          };
+        } catch (err) {
+          console.error(`[Tool error] ${toolUse.name}:`, err.message);
+          return {
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: `Error: ${err.message}`,
+            is_error: true,
+          };
+        }
+      })
+    );
 
     // Continue the conversation with tool results
     messages.push({ role: "assistant", content: response.content });
