@@ -232,7 +232,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
     mcpClient = await getMcpClient(phone, mcpUrl);
   } catch (err) {
     console.error("[MCP connect error]", err.message);
-    await sendSms(phone, "Having trouble connecting to your memory service. Please check your MCP URL and try again. Text 'reset' to update your URL.", chatId);
+    await sendSms(phone, "Having trouble reaching your memories right now. Try again in a moment, or text /reset to reconnect with a new MCP URL.", chatId);
     return;
   }
 
@@ -255,7 +255,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
       mcpTools = tools;
     } catch (retryErr) {
       console.error("[MCP reconnect failed]", retryErr.message);
-      await sendSms(phone, "Couldn't reach your memory service. Try again in a sec.", chatId);
+      await sendSms(phone, "Couldn't reach your memories right now. Try again in a sec!", chatId);
       return;
     }
   }
@@ -288,7 +288,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
     });
   } catch (err) {
     console.error("[Claude API error]", err.message);
-    await sendSms(phone, "Something went wrong processing your message. Try again!", chatId);
+    await sendSms(phone, "Oops, something hiccuped on my end. Try sending that again!", chatId);
     return;
   }
 
@@ -337,7 +337,7 @@ async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
       });
     } catch (err) {
       console.error("[Claude API error in tool loop]", err.message);
-      await sendSms(phone, "Something went wrong. Try again!", chatId);
+      await sendSms(phone, "Oops, something hiccuped. Try sending that again!", chatId);
       return;
     }
   }
@@ -487,12 +487,154 @@ app.post("/webhook", async (req, res) => {
     // Handle the message
     let user = await getUser(fromPhone);
 
+    // ── Secret debug commands (work in any state) ──
+    const cmd = userMessage.toLowerCase().trim();
+
+    if (cmd === "/newuser") {
+      // Full factory reset — nuke user record, conversation history, MCP client
+      console.log(`[Debug] /newuser from ${fromPhone}`);
+      await disconnectMcpClient(fromPhone);
+      chatIdCache.delete(fromPhone);
+      if (user) {
+        await supabase.from("sms_conversations").delete().eq("phone_number", fromPhone);
+        await supabase.from("sms_users").delete().eq("phone_number", fromPhone);
+      }
+      await sendSms(fromPhone, "[DEBUG] User wiped. Text anything to start fresh as a new user.", chatId);
+      return;
+    }
+
+    if (cmd === "/reset") {
+      console.log(`[Debug] /reset from ${fromPhone}`);
+      await disconnectMcpClient(fromPhone);
+      if (user) {
+        await supabase
+          .from("sms_users")
+          .update({ status: "awaiting_mcp_url", mcp_url: null })
+          .eq("phone_number", fromPhone);
+      }
+      await sendSms(fromPhone, "[DEBUG] MCP connection reset. Send your MCP URL to reconnect.", chatId);
+      return;
+    }
+
+    if (cmd === "/status") {
+      console.log(`[Debug] /status from ${fromPhone}`);
+      const historyCount = user ? (await getConversationHistory(fromPhone, 9999)).length : 0;
+      const mcpConnected = mcpClients.has(fromPhone);
+      let toolCount = "N/A";
+      if (mcpConnected) {
+        try {
+          const { tools = [] } = await mcpClients.get(fromPhone).listTools();
+          toolCount = tools.length;
+        } catch { toolCount = "error"; }
+      }
+      const lines = [
+        "[DEBUG] Status",
+        `Phone: ${fromPhone}`,
+        `User exists: ${!!user}`,
+        `State: ${user?.status || "none"}`,
+        `MCP URL: ${user?.mcp_url ? user.mcp_url.substring(0, 40) + "..." : "not set"}`,
+        `MCP client cached: ${mcpConnected}`,
+        `Tools discovered: ${toolCount}`,
+        `Chat ID cached: ${chatIdCache.has(fromPhone) ? chatIdCache.get(fromPhone) : "no"}`,
+        `Conversation messages: ${historyCount}`,
+        `Last active: ${user?.last_active_at || "never"}`,
+      ];
+      await sendSms(fromPhone, lines.join("\n"), chatId);
+      return;
+    }
+
+    if (cmd === "/tools") {
+      console.log(`[Debug] /tools from ${fromPhone}`);
+      if (!user?.mcp_url) {
+        await sendSms(fromPhone, "[DEBUG] No MCP URL configured. Connect first.", chatId);
+        return;
+      }
+      try {
+        const client = await getMcpClient(fromPhone, user.mcp_url);
+        let allTools = [];
+        const params = {};
+        do {
+          const { tools = [], nextCursor } = await client.listTools(params);
+          allTools.push(...tools);
+          params.cursor = nextCursor;
+        } while (params.cursor);
+        const lines = [`[DEBUG] ${allTools.length} MCP tools:`];
+        for (const t of allTools) {
+          const params = t.inputSchema?.properties ? Object.keys(t.inputSchema.properties).join(", ") : "none";
+          lines.push(`\n• ${t.name}\n  ${t.description || "(no description)"}\n  Params: ${params}`);
+        }
+        await sendSms(fromPhone, lines.join("\n"), chatId);
+      } catch (err) {
+        await sendSms(fromPhone, `[DEBUG] Tool discovery failed: ${err.message}`, chatId);
+      }
+      return;
+    }
+
+    if (cmd === "/clearhistory") {
+      console.log(`[Debug] /clearhistory from ${fromPhone}`);
+      const { count } = await supabase
+        .from("sms_conversations")
+        .delete({ count: "exact" })
+        .eq("phone_number", fromPhone);
+      await sendSms(fromPhone, `[DEBUG] Cleared ${count || 0} conversation messages. MCP connection preserved.`, chatId);
+      return;
+    }
+
+    if (cmd === "/ping") {
+      console.log(`[Debug] /ping from ${fromPhone}`);
+      if (!user?.mcp_url) {
+        await sendSms(fromPhone, "[DEBUG] No MCP URL configured.", chatId);
+        return;
+      }
+      const start = Date.now();
+      try {
+        // Force a fresh connection to truly test reachability
+        await disconnectMcpClient(fromPhone);
+        const client = await getMcpClient(fromPhone, user.mcp_url);
+        const { tools = [] } = await client.listTools();
+        const elapsed = Date.now() - start;
+        await sendSms(fromPhone, `[DEBUG] Pong! MCP connected in ${elapsed}ms. ${tools.length} tools available.`, chatId);
+      } catch (err) {
+        const elapsed = Date.now() - start;
+        await sendSms(fromPhone, `[DEBUG] Ping failed after ${elapsed}ms: ${err.message}`, chatId);
+      }
+      return;
+    }
+
+    if (cmd === "/whoami") {
+      console.log(`[Debug] /whoami from ${fromPhone}`);
+      if (!user) {
+        await sendSms(fromPhone, "[DEBUG] No user record found for this phone number.", chatId);
+        return;
+      }
+      const dump = JSON.stringify(user, null, 2);
+      await sendSms(fromPhone, `[DEBUG] User record:\n${dump}`, chatId);
+      return;
+    }
+
+    if (cmd === "/help") {
+      console.log(`[Debug] /help from ${fromPhone}`);
+      const lines = [
+        "[DEBUG] Secret commands:",
+        "/newuser — full wipe, restart as brand new user",
+        "/reset — clear MCP URL, re-enter setup",
+        "/status — show user state & connection info",
+        "/tools — list all MCP tools & params",
+        "/ping — test MCP connection latency",
+        "/clearhistory — wipe conversation, keep MCP",
+        "/whoami — dump raw user record",
+        "/help — this message",
+      ];
+      await sendSms(fromPhone, lines.join("\n"), chatId);
+      return;
+    }
+
     // ── New user ──
     if (!user) {
       user = await createUser(fromPhone);
       await sendSms(
         fromPhone,
-        "Welcome to Weave Memory Bot! \ud83e\udde0\n\nTo get started, please send me your Weave MCP URL. You can find it in your Weave settings.\n\nIt looks like: https://mcp.weave.cloud/sse?key=...",
+        `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nI can remember things for you, help you find them later, and forget anything you want gone. All by texting me.\n\nTo get connected, paste your MCP URL from Weave Fabric. You can find it in your Weave Fabric account under Settings.`,
         chatId
       );
       return;
@@ -506,7 +648,7 @@ app.post("/webhook", async (req, res) => {
       if (!url.startsWith("http://") && !url.startsWith("https://")) {
         await sendSms(
           fromPhone,
-          "That doesn't look like a URL. Please send your Weave MCP URL (starts with https://)",
+          `Hmm, that doesn't look like an MCP URL. It should be a link that starts with https://\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Just paste it here when you're ready!`,
           chatId
         );
         return;
@@ -523,14 +665,14 @@ app.post("/webhook", async (req, res) => {
         await activateUser(fromPhone, url);
         await sendSms(
           fromPhone,
-          `Connected! Found ${tools.length} memory tools. \ud83c\udf89\n\nYou can now:\n\u2022 Save memories: "Remember that my wifi password is abc123"\n\u2022 Search: "What's my wifi password?"\n\u2022 Chat: "What do I know about recipes?"\n\nText 'reset' anytime to update your MCP URL.`,
+          `You're all set! 🎉\n\nHere's what you can do — just text me like you normally would:\n\n💾 Create a memory: "Remember that my anniversary is March 5th"\n🔍 Find a memory: "When is my anniversary?"\n🗑️ Forget something: "Forget my old wifi password"\n\nThat's it — I'm your second brain. Text me anytime!`,
           chatId
         );
       } catch (err) {
         console.error("[MCP validation error]", err.message);
         await sendSms(
           fromPhone,
-          "Couldn't connect to that MCP URL. Please double-check it and try again.\n\nMake sure it's your full Weave MCP URL.",
+          `Hmm, I wasn't able to connect with that URL. Could you double-check it?\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Paste it here and I'll try again!`,
           chatId
         );
       }
@@ -539,17 +681,6 @@ app.post("/webhook", async (req, res) => {
 
     // ── Active user ──
     if (user.status === "active") {
-      // Handle reset command
-      if (userMessage.toLowerCase() === "reset") {
-        await disconnectMcpClient(fromPhone);
-        await supabase
-          .from("sms_users")
-          .update({ status: "awaiting_mcp_url", mcp_url: null })
-          .eq("phone_number", fromPhone);
-        await sendSms(fromPhone, "MCP connection reset. Please send your new Weave MCP URL.", chatId);
-        return;
-      }
-
       await handleActiveUser(fromPhone, user.mcp_url, userMessage, chatId);
     }
   } catch (err) {
