@@ -160,6 +160,14 @@ function verifyWebhook(signature, timestamp, rawBody) {
   return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
 
+// ── URL extraction helper ───────────────────────────────────────────
+// Extracts the first http/https URL from a message that may contain
+// surrounding text (e.g. "This is my MCP URL: https://example.com")
+function extractUrl(text) {
+  const match = text.match(/https?:\/\/[^\s]+/i);
+  return match ? match[0] : null;
+}
+
 // ── Supabase helpers ────────────────────────────────────────────────
 async function getUser(phone) {
   const { data } = await supabase
@@ -211,19 +219,26 @@ async function saveMessage(phone, role, content) {
 }
 
 // ── Claude + MCP tool execution ─────────────────────────────────────
-const SYSTEM_PROMPT = `You're a chill memory sidekick over text. You help people save, find, and manage their stuff using Weave.
+const SYSTEM_PROMPT = `You are a memory assistant over SMS. You help people save, find, and manage their memories using Weave.
 
-Keep it short — this is SMS, not email. Be friendly and natural, like texting a friend.
+ACCURACY IS YOUR #1 PRIORITY. You are a faithful servant of the user's memory.
+
+STRICT RULES:
+- NEVER make up, infer, embellish, or hallucinate information that was not explicitly returned by a tool call. This is the most important rule.
+- ONLY report what the tools actually return. If a tool returns no results, say so clearly — do not guess what the user might have saved.
+- Do NOT fill in gaps with assumptions. If the user asks "what do I know about Sarah?" and the tools return nothing, say "I didn't find any memories about Sarah." Do NOT invent details.
+- When listing memories, reproduce them faithfully. Do not add context, interpretation, or connections that aren't in the data.
+- Keep responses short — this is SMS. Be helpful but concise.
 
 Tool strategy:
 - Saving something new → weave_create_memory
-- Any question about their memories ("what do I know about...", "do I have...", "find my...") → ALWAYS use weave_chat first. It does deep semantic search and is the best way to find relevant stuff even if the wording doesn't match exactly.
+- Searching for specific memories → use weave_chat first (semantic search). If it returns no results, also try weave_list_memories to browse.
 - Browsing or listing all memories → weave_list_memories with pageSize: 100. If the response shows more pages exist (hasMore: true), keep calling with page: 2, 3, etc. until you have everything.
 - Deleting something → weave_forget_memory
 
-CRITICAL: NEVER tell someone you couldn't find anything or that there are no related memories without trying BOTH weave_chat AND weave_list_memories. Always exhaust both tools before saying nothing was found. False negatives are the worst experience — when in doubt, dig deeper.
+Before saying nothing was found, try BOTH weave_chat AND weave_list_memories. But if both tools return no relevant results, tell the user clearly that nothing was found. Never fabricate a response to avoid saying "not found."
 
-If a tool errors out, just let them know and suggest trying again.`;
+If a tool errors out, let them know and suggest trying again.`;
 
 async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
   // Connect to user's MCP and discover tools
@@ -632,6 +647,35 @@ app.post("/webhook", async (req, res) => {
     // ── New user ──
     if (!user) {
       user = await createUser(fromPhone);
+
+      // Check if the first message already contains an MCP URL (e.g. deep-link from the app)
+      const embeddedUrl = extractUrl(userMessage);
+      if (embeddedUrl) {
+        console.log(`[New user] First message contains URL, skipping welcome: ${embeddedUrl}`);
+        try {
+          const testClient = new Client({ name: "sms-memory-bot-test", version: "1.0.0" });
+          const testTransport = new StreamableHTTPClientTransport(new URL(embeddedUrl));
+          await testClient.connect(testTransport);
+          const { tools } = await testClient.listTools();
+          await testClient.close();
+
+          await activateUser(fromPhone, embeddedUrl);
+          await sendSms(
+            fromPhone,
+            `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nYou're all set! 🎉\n\nHere's what you can do — just text me like you normally would:\n\n💾 Create a memory: "Remember that my anniversary is March 5th"\n🔍 Find a memory: "When is my anniversary?"\n🗑️ Forget something: "Forget my old wifi password"\n\nThat's it — I'm your second brain. Text me anytime!`,
+            chatId
+          );
+        } catch (err) {
+          console.error("[New user MCP validation error]", err.message);
+          await sendSms(
+            fromPhone,
+            `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nI tried connecting with the URL you sent, but it didn't work. Could you double-check it?\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Paste it here and I'll try again!`,
+            chatId
+          );
+        }
+        return;
+      }
+
       await sendSms(
         fromPhone,
         `Hey there! 👋 Welcome to Weave — your personal memory, just a text away.\n\nI can remember things for you, help you find them later, and forget anything you want gone. All by texting me.\n\nTo get connected, paste your MCP URL from Weave Fabric. You can find it in your Weave Fabric account under Settings.`,
@@ -642,10 +686,10 @@ app.post("/webhook", async (req, res) => {
 
     // ── Awaiting MCP URL ──
     if (user.status === "awaiting_mcp_url") {
-      const url = userMessage.trim();
+      // Extract URL from message — supports bare URLs and messages with surrounding text
+      const url = extractUrl(userMessage);
 
-      // Basic URL validation
-      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      if (!url) {
         await sendSms(
           fromPhone,
           `Hmm, that doesn't look like an MCP URL. It should be a link that starts with https://\n\nYou can find your MCP URL in your Weave Fabric account under Settings. Just paste it here when you're ready!`,
