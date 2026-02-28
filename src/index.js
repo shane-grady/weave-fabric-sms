@@ -60,6 +60,22 @@ function linqHeaders() {
   };
 }
 
+async function linqFetch(url, options) {
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (attempt >= MAX_RETRIES || (res.status !== 429 && res.status < 500)) return res;
+      await res.text(); // drain body before retry
+      console.warn(`[LINQ] ${res.status} on attempt ${attempt + 1}, retrying...`);
+    } catch (err) {
+      if (attempt >= MAX_RETRIES) throw err;
+      console.warn(`[LINQ] Network error on attempt ${attempt + 1}: ${err.message}`);
+    }
+    await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+  }
+}
+
 async function getOrCreateChat(to, initialText) {
   // Return cached chatId if we have one
   if (chatIdCache.has(to)) {
@@ -80,7 +96,7 @@ async function getOrCreateChat(to, initialText) {
   console.log(`[LINQ] Creating chat: POST ${url}`);
   console.log(`[LINQ] Body:`, JSON.stringify(body));
 
-  const res = await fetch(url, {
+  const res = await linqFetch(url, {
     method: "POST",
     headers: linqHeaders(),
     body: JSON.stringify(body),
@@ -123,7 +139,7 @@ async function sendSms(to, text, chatId) {
     console.log(`[sendSms] POST ${url}`);
     console.log(`[sendSms] Body:`, JSON.stringify(body).substring(0, 200));
 
-    const res = await fetch(url, {
+    const res = await linqFetch(url, {
       method: "POST",
       headers: linqHeaders(),
       body: JSON.stringify(body),
@@ -153,7 +169,7 @@ async function sendTypingIndicator(chatId, action) {
   if (!chatId) return;
   const url = `${LINQ_BASE}/v3/chats/${chatId}/typing-indicator`;
   try {
-    const res = await fetch(url, {
+    const res = await linqFetch(url, {
       method: "POST",
       headers: linqHeaders(),
       body: JSON.stringify({ action }),
@@ -166,13 +182,30 @@ async function sendTypingIndicator(chatId, action) {
   }
 }
 
+async function markChatRead(chatId) {
+  if (!chatId) return;
+  try {
+    await linqFetch(`${LINQ_BASE}/v3/chats/${chatId}/read`, {
+      method: "POST",
+      headers: linqHeaders(),
+    });
+  } catch (err) {
+    console.warn("[ReadReceipt] error:", err.message);
+  }
+}
+
 function verifyWebhook(signature, timestamp, rawBody) {
   if (!LINQ_SIGNING_SECRET) return true;
+
+  // Replay protection: reject webhooks older than 5 minutes
+  const ageMs = Math.abs(Date.now() - Number(timestamp) * 1000);
+  if (!Number.isFinite(ageMs) || ageMs > 5 * 60 * 1000) return false;
+
   const expected = crypto
     .createHmac("sha256", LINQ_SIGNING_SECRET)
     .update(`${timestamp}.${rawBody}`)
     .digest("hex");
-  const sig = signature || "";
+  const sig = (signature || "").replace(/^sha256=/, "");
   if (sig.length !== expected.length) return false;
   return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
@@ -466,7 +499,20 @@ app.post("/webhook", async (req, res) => {
 
     const { event_type, data } = req.body;
 
-    // Only handle inbound messages
+    // Handle delivery status events
+    if (event_type === "message.delivered") {
+      const msgId = data?.message?.id || data?.message_id;
+      console.log(`[Webhook] Message delivered: ${msgId}`);
+      return res.json({ ok: true });
+    }
+
+    if (event_type === "message.failed") {
+      const msgId = data?.message?.id || data?.message_id;
+      const reason = data?.error?.message || data?.reason || "unknown";
+      console.error(`[Webhook] Message delivery failed: ${msgId}, reason: ${reason}`);
+      return res.json({ ok: true });
+    }
+
     if (event_type !== "message.received") {
       console.log(`[Webhook] Ignoring event: ${event_type}`);
       return res.json({ ok: true });
@@ -506,6 +552,9 @@ app.post("/webhook", async (req, res) => {
       chatIdCache.set(fromPhone, chatId);
       console.log(`[Webhook] Cached chatId ${chatId} for ${fromPhone}`);
     }
+
+    // Mark the chat as read so the sender sees a read receipt
+    markChatRead(chatId);
 
     console.log(`[Webhook] Parsed: chat=${chatId}, from=${fromPhone}, text=${userMessage?.substring(0, 80)}`);
 
