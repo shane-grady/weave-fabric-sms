@@ -149,6 +149,23 @@ async function sendSms(to, text, chatId) {
   }
 }
 
+async function sendTypingIndicator(chatId, action) {
+  if (!chatId) return;
+  const url = `${LINQ_BASE}/v3/chats/${chatId}/typing-indicator`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: linqHeaders(),
+      body: JSON.stringify({ action }),
+    });
+    if (!res.ok) {
+      console.warn(`[Typing] ${action} failed:`, res.status);
+    }
+  } catch (err) {
+    console.warn(`[Typing] ${action} error:`, err.message);
+  }
+}
+
 function verifyWebhook(signature, timestamp, rawBody) {
   if (!LINQ_SIGNING_SECRET) return true;
   const expected = crypto
@@ -241,6 +258,9 @@ Before saying nothing was found, try BOTH weave_chat AND weave_list_memories. Bu
 If a tool errors out, let them know and suggest trying again.`;
 
 async function handleActiveUser(phone, mcpUrl, userMessage, chatId) {
+  // Show typing indicator while we process the response
+  sendTypingIndicator(chatId, "start");
+
   // Connect to user's MCP and discover tools
   let mcpClient;
   try {
